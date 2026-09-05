@@ -1,6 +1,6 @@
-#include "../include/vec3.hpp"
-#include "../include/mat4.hpp"
-#include "../include/triangle.hpp"
+#include "vec3.hpp"
+#include "mat4.hpp"
+#include "triangle.hpp"
 #include <SDL2/SDL.h>
 #include <vector>
 #include <iostream>
@@ -45,10 +45,28 @@ void draw_filled_triangle(SDL_Renderer* renderer, const triangle& tri) {
 }
 
 int main() {
-    SDL_Init(SDL_INIT_VIDEO);
+    // Every one of these can fail (no display, no video driver, headless session).
+    // Unchecked, the first null pointer reaches SDL as a segfault with nothing to read.
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
+        return 1;
+    }
+
     SDL_Window* window = SDL_CreateWindow("Software Rasterizer",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
+    if (!window) {
+        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << "\n";
+        SDL_Quit();
+        return 1;
+    }
+
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) {
+        std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
 
     // Create our projection matrix
     mat4 proj_matrix = mat4::perspective(90.0, (double)WINDOW_HEIGHT / (double)WINDOW_WIDTH, 0.1, 1000.0);
