@@ -20,7 +20,7 @@ public:
     // Creates the Perspective Projection Matrix
     static mat4 perspective(double fov_degrees, double aspect_ratio, double z_near, double z_far) {
         mat4 mat;
-        double fov_rad = 1.0 / std::tan(fov_degrees * 0.5 / 180.0 * 3.14159);
+        double fov_rad = 1.0 / std::tan(fov_degrees * 0.5 / 180.0 * M_PI);
 
         mat.m[0][0] = aspect_ratio * fov_rad;
         mat.m[1][1] = fov_rad;
@@ -41,4 +41,4 @@ public:
         w      = i.x() * m[0][3] + i.y() * m[1][3] + i.z() * m[2][3] + m[3][3];
         return o;
     }
-};
+};

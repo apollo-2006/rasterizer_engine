@@ -2,47 +2,216 @@
 #include "mat4.hpp"
 #include "triangle.hpp"
 #include <SDL2/SDL.h>
-#include <vector>
-#include <iostream>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <vector>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 
 const int WINDOW_WIDTH = 800;
 const int WINDOW_HEIGHT = 600;
 
-// Barycentric algorithm to determine if a 2D point (x,y) is inside a 2D triangle
-bool is_point_in_triangle(int x, int y, const vec3& v0, const vec3& v1, const vec3& v2) {
-    auto edge_func = [](const vec3& a, const vec3& b, const vec3& c) {
-        return (c.x() - a.x()) * (b.y() - a.y()) - (c.y() - a.y()) * (b.x() - a.x());
+// The whole frame is drawn into these on the CPU, then uploaded to SDL as one
+// texture. SDL never draws a pixel of the image itself.
+std::vector<uint32_t> framebuffer(WINDOW_WIDTH * WINDOW_HEIGHT);
+std::vector<float> depthbuffer(WINDOW_WIDTH * WINDOW_HEIGHT);
+
+// A unit cube around the origin, two triangles per face, wound counter-clockwise
+// when seen from outside so the geometric normal points outward.
+std::vector<triangle> make_cube() {
+    const vec3 p[8] = {
+        {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+        {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1},
     };
-
-    vec3 p(x, y, 0);
-    double w0 = edge_func(v1, v2, p);
-    double w1 = edge_func(v2, v0, p);
-    double w2 = edge_func(v0, v1, p);
-
-    return (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+    const int faces[6][4] = {
+        {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 4, 7, 3}, {1, 2, 6, 5}, {3, 7, 6, 2}, {0, 1, 5, 4},
+    };
+    const vec3 colors[6] = {
+        {0, 255, 100}, {0, 200, 255}, {255, 180, 60}, {230, 90, 220}, {240, 240, 240}, {255, 90, 90},
+    };
+    std::vector<triangle> mesh;
+    for (int f = 0; f < 6; f++) {
+        const auto& q = faces[f];
+        mesh.emplace_back(p[q[0]], p[q[1]], p[q[2]], colors[f]);
+        mesh.emplace_back(p[q[0]], p[q[2]], p[q[3]], colors[f]);
+    }
+    return mesh;
 }
 
-// Bounding box rasterizer
-void draw_filled_triangle(SDL_Renderer* renderer, const triangle& tri) {
-    // 1. Find the 2D bounding box of the triangle on the screen
-    int min_x = std::max(0, static_cast<int>(std::min({tri.p[0].x(), tri.p[1].x(), tri.p[2].x()})));
-    int min_y = std::max(0, static_cast<int>(std::min({tri.p[0].y(), tri.p[1].y(), tri.p[2].y()})));
-    int max_x = std::min(WINDOW_WIDTH - 1, static_cast<int>(std::max({tri.p[0].x(), tri.p[1].x(), tri.p[2].x()})));
-    int max_y = std::min(WINDOW_HEIGHT - 1, static_cast<int>(std::max({tri.p[0].y(), tri.p[1].y(), tri.p[2].y()})));
+// A vertex after projection: pixel position, and 1/w for depth. 1/w is what
+// interpolates linearly across the screen; post-divide z does not.
+struct screen_vertex {
+    double x, y, inv_w;
+};
 
-    SDL_SetRenderDrawColor(renderer, tri.color.x(), tri.color.y(), tri.color.z(), 255);
+struct options {
+    bool culling = true;
+    bool depth_view = false;
+    bool paused = false;
+};
 
-    // 2. Loop over every pixel in the bounding box
+options opts;
+double frame_ms = 0;
+int triangles_drawn = 0;
+
+void clear_buffers() {
+    std::fill(framebuffer.begin(), framebuffer.end(), 0xFF141414);
+    std::fill(depthbuffer.begin(), depthbuffer.end(), 0.0f);  // 0 = infinitely far
+}
+
+// Bounding box rasterizer with edge functions. The three edge values, divided by
+// the triangle's signed area, are its barycentric weights: the same numbers decide
+// coverage and interpolate depth.
+void draw_triangle(const screen_vertex& v0, const screen_vertex& v1, const screen_vertex& v2,
+                   uint32_t argb) {
+    auto edge = [](const screen_vertex& a, const screen_vertex& b, double x, double y) {
+        return (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x);
+    };
+
+    const double area = edge(v0, v1, v2.x, v2.y);
+    if (area == 0) return;
+
+    int min_x = std::max(0, static_cast<int>(std::floor(std::min({v0.x, v1.x, v2.x}))));
+    int min_y = std::max(0, static_cast<int>(std::floor(std::min({v0.y, v1.y, v2.y}))));
+    int max_x = std::min(WINDOW_WIDTH - 1, static_cast<int>(std::ceil(std::max({v0.x, v1.x, v2.x}))));
+    int max_y = std::min(WINDOW_HEIGHT - 1, static_cast<int>(std::ceil(std::max({v0.y, v1.y, v2.y}))));
+
     for (int y = min_y; y <= max_y; y++) {
         for (int x = min_x; x <= max_x; x++) {
-            // 3. If the pixel is inside the math boundaries, color it
-            if (is_point_in_triangle(x, y, tri.p[0], tri.p[1], tri.p[2])) {
-                SDL_RenderDrawPoint(renderer, x, y);
-            }
+            // Sample at the pixel centre. Dividing by the signed area makes the
+            // inside test the same for either winding order.
+            const double px = x + 0.5, py = y + 0.5;
+            const double w0 = edge(v1, v2, px, py) / area;
+            const double w1 = edge(v2, v0, px, py) / area;
+            const double w2 = 1.0 - w0 - w1;
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+
+            const float depth = static_cast<float>(w0 * v0.inv_w + w1 * v1.inv_w + w2 * v2.inv_w);
+            const int i = y * WINDOW_WIDTH + x;
+            if (depth <= depthbuffer[i]) continue;  // larger 1/w is closer
+            depthbuffer[i] = depth;
+            framebuffer[i] = argb;
         }
     }
 }
+
+// Greyscale view of the depth buffer: nearer is brighter.
+void show_depth() {
+    float lo = 1e30f, hi = 0;
+    for (float d : depthbuffer) if (d > 0) { lo = std::min(lo, d); hi = std::max(hi, d); }
+    const float span = hi > lo ? hi - lo : 1;
+    for (size_t i = 0; i < depthbuffer.size(); i++) {
+        if (depthbuffer[i] <= 0) continue;
+        const uint32_t v = 40 + static_cast<uint32_t>(215 * (depthbuffer[i] - lo) / span);
+        framebuffer[i] = 0xFF000000 | (v << 16) | (v << 8) | v;
+    }
+}
+
+void render(const std::vector<triangle>& mesh, const mat4& proj, double time) {
+    clear_buffers();
+    triangles_drawn = 0;
+
+    const double cy = std::cos(time), sy = std::sin(time);
+    const double cx = std::cos(time * 0.6), sx = std::sin(time * 0.6);
+    // Direction toward the light: up, right, and back toward the camera.
+    const vec3 light = vec3(0.4, 0.7, -1.0).normalize();
+
+    for (const triangle& tri : mesh) {
+        // 1. Model transform: rotate about Y, then X, then push 4 units into the screen.
+        vec3 world[3];
+        for (int k = 0; k < 3; k++) {
+            const vec3& v = tri.p[k];
+            const double x1 = v.x() * cy + v.z() * sy;
+            const double z1 = -v.x() * sy + v.z() * cy;
+            const double y2 = v.y() * cx - z1 * sx;
+            const double z2 = v.y() * sx + z1 * cx;
+            world[k] = vec3(x1, y2, z2 + 4.0);
+        }
+
+        // 2. Back-face culling in view space. The camera sits at the origin, so a
+        //    face whose normal points away from the ray to it cannot be seen.
+        const vec3 normal = vec3::cross(world[1] - world[0], world[2] - world[0]).normalize();
+        if (opts.culling && vec3::dot(normal, world[0]) >= 0) continue;
+
+        // 3. Flat shading: one Lambert term for the whole face, with a floor so
+        //    faces turned from the light stay visible.
+        const double lambert = std::max(0.18, vec3::dot(normal, light));
+        const uint32_t argb = 0xFF000000 |
+            (static_cast<uint32_t>(tri.color.x() * lambert) << 16) |
+            (static_cast<uint32_t>(tri.color.y() * lambert) << 8) |
+            static_cast<uint32_t>(tri.color.z() * lambert);
+
+        // 4. Projection, perspective divide, viewport. Screen y grows downward, so
+        //    NDC y is flipped on the way to pixels.
+        screen_vertex sv[3];
+        bool behind = false;
+        for (int k = 0; k < 3; k++) {
+            double w = 1.0;
+            const vec3 clip = proj.multiply_vector(world[k], w);
+            if (w <= 0.0) { behind = true; break; }
+            sv[k].x = (clip.x() / w + 1.0) * 0.5 * WINDOW_WIDTH;
+            sv[k].y = (1.0 - clip.y() / w) * 0.5 * WINDOW_HEIGHT;
+            sv[k].inv_w = 1.0 / w;
+        }
+        if (behind) continue;  // no near-plane clipping: drop instead of smearing
+
+        // 5. Rasterize with the depth test.
+        draw_triangle(sv[0], sv[1], sv[2], argb);
+        triangles_drawn++;
+    }
+
+    if (opts.depth_view) show_depth();
+}
+
+struct app {
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    SDL_Texture* texture = nullptr;
+    std::vector<triangle> mesh = make_cube();
+    mat4 proj = mat4::perspective(70.0, (double)WINDOW_HEIGHT / (double)WINDOW_WIDTH, 0.1, 1000.0);
+    double time = 0.0;
+    bool quit = false;
+};
+
+app g;
+
+void frame() {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) g.quit = true;
+        if (e.type == SDL_KEYDOWN) {
+            switch (e.key.keysym.sym) {
+                case SDLK_c: opts.culling = !opts.culling; break;
+                case SDLK_z: opts.depth_view = !opts.depth_view; break;
+                case SDLK_SPACE: opts.paused = !opts.paused; break;
+                case SDLK_ESCAPE: g.quit = true; break;
+            }
+        }
+    }
+
+    const Uint64 t0 = SDL_GetPerformanceCounter();
+    if (!opts.paused) g.time += 0.01;
+    render(g.mesh, g.proj, g.time);
+    frame_ms = 1000.0 * (SDL_GetPerformanceCounter() - t0) / SDL_GetPerformanceFrequency();
+
+    SDL_UpdateTexture(g.texture, nullptr, framebuffer.data(), WINDOW_WIDTH * sizeof(uint32_t));
+    SDL_RenderCopy(g.renderer, g.texture, nullptr, nullptr);
+    SDL_RenderPresent(g.renderer);
+}
+
+#ifdef __EMSCRIPTEN__
+extern "C" {
+EMSCRIPTEN_KEEPALIVE void set_culling(int on) { opts.culling = on; }
+EMSCRIPTEN_KEEPALIVE void set_depth_view(int on) { opts.depth_view = on; }
+EMSCRIPTEN_KEEPALIVE void set_paused(int on) { opts.paused = on; }
+EMSCRIPTEN_KEEPALIVE double get_frame_ms() { return frame_ms; }
+EMSCRIPTEN_KEEPALIVE int get_triangles_drawn() { return triangles_drawn; }
+}
+#endif
 
 int main() {
     // Every one of these can fail (no display, no video driver, headless session).
@@ -52,84 +221,45 @@ int main() {
         return 1;
     }
 
-    SDL_Window* window = SDL_CreateWindow("Software Rasterizer",
+    g.window = SDL_CreateWindow("Software Rasterizer  [C] culling  [Z] depth  [space] pause",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
-    if (!window) {
+    if (!g.window) {
         std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << "\n";
         SDL_Quit();
         return 1;
     }
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) {
+    g.renderer = SDL_CreateRenderer(g.window, -1, SDL_RENDERER_ACCELERATED);
+    if (!g.renderer) {
         std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
-        SDL_DestroyWindow(window);
+        SDL_DestroyWindow(g.window);
         SDL_Quit();
         return 1;
     }
 
-    // Create our projection matrix
-    mat4 proj_matrix = mat4::perspective(90.0, (double)WINDOW_HEIGHT / (double)WINDOW_WIDTH, 0.1, 1000.0);
+    g.texture = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                                  WINDOW_WIDTH, WINDOW_HEIGHT);
+    if (!g.texture) {
+        std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << "\n";
+        SDL_DestroyRenderer(g.renderer);
+        SDL_DestroyWindow(g.window);
+        SDL_Quit();
+        return 1;
+    }
 
-    // Define a 3D triangle in the world
-    triangle mesh_tri(
-        vec3(0.0, 1.0, 0.0),   // Top vertex
-        vec3(1.0, -1.0, 0.0),  // Bottom right
-        vec3(-1.0, -1.0, 0.0), // Bottom left
-        vec3(0, 255, 100)      // Neon green color
-    );
-
-    double time = 0.0;
-    bool quit = false;
-    SDL_Event e;
-
-    while (!quit) {
-        while (SDL_PollEvent(&e)) { if (e.type == SDL_QUIT) quit = true; }
-
-        SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
-        SDL_RenderClear(renderer);
-
-        time += 0.01;
-
-        // Push the triangle back in Z-space so the camera can see it
-        triangle projected_tri = mesh_tri;
-        for (int i = 0; i < 3; i++) {
-            vec3 v = projected_tri.p[i];
-
-            // Simple Z-axis translation and Y-axis rotation using basic trig
-            double rotated_x = v.x() * std::cos(time) - v.z() * std::sin(time);
-            double rotated_z = v.x() * std::sin(time) + v.z() * std::cos(time);
-            v.e[0] = rotated_x;
-            v.e[2] = rotated_z + 3.0; // Push 3 units deep into the screen
-
-            // Execute the Graphics Pipeline
-            double w = 1.0;
-            vec3 projected = proj_matrix.multiply_vector(v, w);
-
-            // Perspective Divide (The core of 3D projection)
-            if (w != 0.0) {
-                projected.e[0] /= w;
-                projected.e[1] /= w;
-                projected.e[2] /= w;
-            }
-
-            // Scale from normalized math space (-1 to +1) to actual Screen Pixels
-            projected.e[0] += 1.0; projected.e[1] += 1.0;
-            projected.e[0] *= 0.5 * WINDOW_WIDTH;
-            projected.e[1] *= 0.5 * WINDOW_HEIGHT;
-
-            projected_tri.p[i] = projected;
-        }
-
-        // Draw the math to the screen
-        draw_filled_triangle(renderer, projected_tri);
-
-        SDL_RenderPresent(renderer);
+#ifdef __EMSCRIPTEN__
+    // The browser owns the loop; it calls frame() once per display refresh.
+    emscripten_set_main_loop(frame, 0, 1);
+#else
+    while (!g.quit) {
+        frame();
         SDL_Delay(16); // ~60 FPS
     }
 
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    SDL_DestroyTexture(g.texture);
+    SDL_DestroyRenderer(g.renderer);
+    SDL_DestroyWindow(g.window);
     SDL_Quit();
+#endif
     return 0;
 }

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rasterizer_engine · C++ and SDL2 in the browser</title>
+  <meta name="description" content="A C++ software rasterizer with a depth buffer and back-face culling, compiled with its SDL2 frontend to WebAssembly.">
+  <link rel="stylesheet" href="demo.css">
+  <style>
+    canvas { width: 100%; max-width: 800px; aspect-ratio: 4 / 3; height: auto; display: block; border-radius: 8px; background: #141414; }
+    label.toggle { display: flex; gap: 10px; align-items: center; cursor: pointer; font-size: 0.9rem; }
+    ol.pipeline { margin: 0; padding-left: 20px; font-size: 0.88rem; color: var(--muted); }
+    ol.pipeline li { margin-bottom: 6px; }
+    ol.pipeline b { color: var(--fg); font-weight: 500; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">rasterizer_engine · C++17 + SDL2 compiled to WebAssembly</p>
+      <h1>The desktop program, unchanged, in a tab</h1>
+      <p class="lede">This is <span class="mono">src/main.cpp</span> built with Emscripten's SDL2 port instead of the system one.
+        Every pixel is computed on the CPU into a framebuffer and handed to SDL as a single texture per frame.</p>
+    </div>
+    <nav class="links">
+      <a href="https://github.com/apollo-2006/rasterizer_engine">source</a>
+      <a href="https://apollo-2006.github.io/cpu_rasterizer/">the JavaScript one</a>
+    </nav>
+  </header>
+
+  <div class="grid" style="grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr)">
+    <section class="panel">
+      <canvas id="canvas" width="800" height="600" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+      <div class="stats" style="margin-top:12px">
+        <div class="stat"><b id="sMs">-</b><span>CPU per frame</span></div>
+        <div class="stat"><b id="sTris">-</b><span>triangles drawn</span></div>
+        <div class="stat"><b>800 × 600</b><span>framebuffer</span></div>
+      </div>
+      <p class="small err" id="err" hidden></p>
+    </section>
+
+    <section class="panel">
+      <h2>Pipeline switches</h2>
+      <div style="display:grid;gap:10px;margin-bottom:16px">
+        <label class="toggle"><input type="checkbox" id="cull" checked> back-face culling <span class="muted mono small">[C]</span></label>
+        <label class="toggle"><input type="checkbox" id="depth"> show the depth buffer <span class="muted mono small">[Z]</span></label>
+        <label class="toggle"><input type="checkbox" id="pause"> pause <span class="muted mono small">[space]</span></label>
+      </div>
+      <h2>Each frame</h2>
+      <ol class="pipeline">
+        <li><b>Model transform.</b> Rotate each vertex about Y and X, push it 4 units into the screen.</li>
+        <li><b>Culling.</b> Drop faces whose normal points away from the camera: 12 triangles become 6.</li>
+        <li><b>Flat shading.</b> One Lambert term per face from the normal and a fixed light.</li>
+        <li><b>Projection.</b> <span class="mono">mat4::perspective</span>, then divide by <span class="mono">w</span> and map to pixels.</li>
+        <li><b>Rasterize.</b> Edge functions over a bounding box; their barycentric weights interpolate <span class="mono">1/w</span> for a per-pixel depth test.</li>
+      </ol>
+      <p class="small muted" style="margin-top:12px">Turn culling off and nothing looks different: the depth buffer already hides the back faces.
+        It just costs twice the rasterization to find that out.</p>
+    </section>
+  </div>
+
+  <footer>rasterizer_engine by <a href="https://abirdeol.tech">Abir Deol</a></footer>
+</div>
+<script>
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    printErr: function (t) { console.warn(t); },
+    onAbort: function (what) { var e = document.getElementById('err'); e.hidden = false; e.textContent = 'engine stopped: ' + what; },
+  };
+</script>
+<script src="app.js"></script>
+<script src="forge_engine.js"></script>
+</body>
+</html>
