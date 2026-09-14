@@ -59,7 +59,7 @@ h2 {
   text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
 }
 
-.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
 .panel { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
 .panel.wide { grid-column: 1 / -1; }
 
@@ -97,6 +97,22 @@ button.warm { background: var(--warm-soft); border-color: rgba(217, 185, 138, 0.
 .note { border-left: 2px solid var(--accent-warm); background: var(--warm-soft); padding: 10px 14px; border-radius: 0 6px 6px 0; color: var(--fg); font-size: 0.88rem; }
 
 footer { margin-top: 36px; color: var(--muted); font-size: 0.8rem; font-family: var(--font-mono); }
+
+/* Two columns on wide screens, one on phones. */
+.split { display: grid; gap: 16px; grid-template-columns: minmax(0, 2fr) minmax(min(280px, 100%), 1fr); }
+@media (max-width: 760px) { .split { grid-template-columns: minmax(0, 1fr); } }
+
+/* Links to the other demos, at the bottom of every page. */
+.more-demos {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  margin-top: 36px; padding-top: 16px; border-top: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: 0.78rem;
+}
+.more-demos span { color: var(--muted); letter-spacing: 0.12em; text-transform: uppercase; font-size: 0.7rem; margin-right: 4px; }
+.more-demos a { color: var(--fg); }
+.more-demos a:hover { color: var(--accent); }
+.more-demos a.all { color: var(--accent-warm); }
+.more-demos + footer { margin-top: 14px; }
 
 .table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.8rem; }

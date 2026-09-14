@@ -8,5 +8,5 @@ em++ -std=c++17 -O3 -Wall -Wextra -I../include ../src/main.cpp \
   -sUSE_SDL=2 -sENVIRONMENT=web -sALLOW_MEMORY_GROWTH=1 \
   -sEXPORTED_FUNCTIONS=_main,_set_culling,_set_depth_view,_set_paused,_get_frame_ms,_get_triangles_drawn \
   -o dist/forge_engine.js
-cp index.html app.js demo.css dist/
+cp index.html app.js demo.css og.jpg dist/
 echo "built web/dist"

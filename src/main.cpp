@@ -59,7 +59,7 @@ double frame_ms = 0;
 int triangles_drawn = 0;
 
 void clear_buffers() {
-    std::fill(framebuffer.begin(), framebuffer.end(), 0xFF141414);
+    std::fill(framebuffer.begin(), framebuffer.end(), 0xFF070B12);  // the demo page's background
     std::fill(depthbuffer.begin(), depthbuffer.end(), 0.0f);  // 0 = infinitely far
 }
 
@@ -173,7 +173,7 @@ struct app {
     SDL_Texture* texture = nullptr;
     std::vector<triangle> mesh = make_cube();
     mat4 proj = mat4::perspective(70.0, (double)WINDOW_HEIGHT / (double)WINDOW_WIDTH, 0.1, 1000.0);
-    double time = 0.0;
+    double time = 0.7;  // start at an angle, so the first frame already reads as a cube
     bool quit = false;
 };
 
